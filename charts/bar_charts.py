@@ -15,7 +15,7 @@ from charts.insights_functions import (
     generate_comparison_insights
 )
 
-from common_functions import (
+from charts.common_functions import (
     get_scale_and_format_eur,
     generate_intelligent_ylabel,
     setup_chart_style
