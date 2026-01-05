@@ -1,7 +1,9 @@
 import pandas as pd
-from typing import Dict, Union, Literal
 import json
 import numpy as np
+from typing import Dict, List, Tuple, Union, Literal
+import re
+from typing import Dict, Union
 
 # Diccionario de estimadores disponibles (mismo que en la función de gráficos)
 AVAILABLE_ESTIMATORS = {
@@ -85,7 +87,6 @@ def generate_multilevel_aggregations(
 
     return result
 
-
 def _validate_inputs(df: pd.DataFrame, cat_col1: str, cat_col2: str, num_col: str,
                     values: str, estimator: str) -> None:
     """Validate input parameters."""
@@ -118,7 +119,6 @@ def _validate_inputs(df: pd.DataFrame, cat_col1: str, cat_col2: str, num_col: st
 
     if estimator not in AVAILABLE_ESTIMATORS:
         raise ValueError(f"Invalid estimator '{estimator}'. Options: {list(AVAILABLE_ESTIMATORS.keys())}")
-
 
 def _create_rollup_table(df: pd.DataFrame, cat_col1: str, cat_col2: str,
                         num_col: str, estimator: str) -> pd.DataFrame:
@@ -171,7 +171,6 @@ def _create_rollup_table(df: pd.DataFrame, cat_col1: str, cat_col2: str,
 
     return rollup_table
 
-
 def _create_rollup_table_fallback(df: pd.DataFrame, cat_col1: str, cat_col2: str,
                                  num_col: str, estimator: str) -> pd.DataFrame:
     """Fallback method using the original groupby approach."""
@@ -222,7 +221,6 @@ def _create_rollup_table_fallback(df: pd.DataFrame, cat_col1: str, cat_col2: str
                             ignore_index=True)
 
     return rollup_table
-
 
 def _build_result_dictionary(
     aggregations: pd.DataFrame,
@@ -312,7 +310,6 @@ def _build_result_dictionary(
 
     return result
 
-
 def _get_estimator_label(estimator: str) -> str:
     """Get descriptive label for estimator."""
     labels = {
@@ -329,13 +326,11 @@ def _get_estimator_label(estimator: str) -> str:
     }
     return labels.get(estimator, estimator.title())
 
-
 def _safe_division(numerator: Union[int, float], denominator: Union[int, float]) -> float:
     """Safely perform division, returning 0.0 when denominator is zero."""
     if denominator == 0:
         return 0.0
     return float(numerator) / float(denominator)
-
 
 def _convert_to_python_type(value: Union[int, float, np.number]) -> Union[int, float]:
     """Convert numpy types to native Python types for JSON serialization."""
@@ -346,10 +341,6 @@ def _convert_to_python_type(value: Union[int, float, np.number]) -> Union[int, f
         return float(value)
     else:
         return value
-
-from typing import Dict, List, Tuple, Union
-import re
-
 
 def add_pareto_insights(
     aggregations_dict: Dict[str, Union[float, int]],
@@ -405,7 +396,6 @@ def add_pareto_insights(
 
     return result
 
-
 def _parse_aggregations_structure(aggregations_dict: Dict) -> Dict:
     """Parse the aggregations dictionary to extract category structure."""
 
@@ -443,7 +433,6 @@ def _parse_aggregations_structure(aggregations_dict: Dict) -> Dict:
 
     return parsed
 
-
 def _add_top_contributors_insights(result: Dict, category_name: str,
                                  subcategory_data: List[Dict],
                                  concentration_threshold: float, top_n: int):
@@ -475,7 +464,6 @@ def _add_top_contributors_insights(result: Dict, category_name: str,
     result[f"Concentration analysis for {category_name}"] = \
         f"{concentration_threshold}% concentrated in {count_for_threshold} out of {total_subcategories} subcategories"
 
-
 def _add_dominance_insights(result: Dict, category_name: str,
                           subcategory_data: List[Dict], dominance_multiplier: float):
     """Add dominance analysis insights."""
@@ -501,7 +489,6 @@ def _add_dominance_insights(result: Dict, category_name: str,
         result[f"Dominant subcategories in {category_name}"] = \
             f"{len(dominant_subs)} above {dominance_multiplier}x fair share: {', '.join(dominant_details)}"
 
-
 def _add_underperformer_insights(result: Dict, category_name: str,
                                subcategory_data: List[Dict],
                                underperformer_threshold: float):
@@ -516,10 +503,6 @@ def _add_underperformer_insights(result: Dict, category_name: str,
 
         result[f"Underperformers in {category_name}"] = \
             f"{len(underperformers)} below {underperformer_threshold}%: {', '.join(underperformer_names)}"
-
-import numpy as np
-import re
-from typing import Dict, Union
 
 def generate_comparison_insights(data_json: Dict[str, Union[float, np.float64]]) -> Dict[str, float]:
     """

@@ -10,7 +10,7 @@ try:
 except ImportError:
     SCIPY_AVAILABLE = False
 
-from insights_functions import (
+from charts.insights_functions import (
     AVAILABLE_ESTIMATORS,
     generate_comparison_insights
 )
