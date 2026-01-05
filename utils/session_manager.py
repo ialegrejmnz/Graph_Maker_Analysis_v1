@@ -14,22 +14,6 @@ def initialize_session_state():
     if 'filename' not in st.session_state:
         st.session_state.filename = None
     
-    if 'upload_timestamp' not in st.session_state:
-        st.session_state.upload_timestamp = None
-    
-    # Estado de gráficas generadas
-    if 'generated_charts' not in st.session_state:
-        st.session_state.generated_charts = []
-    
-    # Estado de configuración de exportación
-    if 'export_format' not in st.session_state:
-        st.session_state.export_format = 'PNG'
-    
-    if 'export_resolution' not in st.session_state:
-        st.session_state.export_resolution = 'Standard (300 DPI)'
-    
-    if 'include_metadata' not in st.session_state:
-        st.session_state.include_metadata = True
-    
-    if 'transparent_bg' not in st.session_state:
-        st.session_state.transparent_bg = True
+    # Estado de gráficas guardadas (colección final)
+    if 'saved_charts' not in st.session_state:
+        st.session_state.saved_charts = []
