@@ -1,9 +1,12 @@
 import pandas as pd
 import json
 import numpy as np
-from typing import Dict, List, Tuple, Union, Literal
+from typing import Dict, List, Tuple, Union, Literal, Any, Optional
 import re
 from typing import Dict, Union
+import requests
+import logging
+import time
 
 # Diccionario de estimadores disponibles (mismo que en la función de gráficos)
 AVAILABLE_ESTIMATORS = {
@@ -634,3 +637,205 @@ def generate_comparison_insights(data_json: Dict[str, Union[float, np.float64]])
         enhanced_json[f"{metric_name} spread (max - min)"] = round(spread, 2)
 
     return enhanced_json
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def generate_strategic_insights(
+    cat_1: str,
+    cat_2: str,
+    num_col: str,
+    insights_json: Dict[str, Any],
+    api_key: str,
+    max_retries: int = 3
+) -> Optional[Dict[str, str]]:
+    """
+    Generate strategic insights from categorical and numerical data analysis using OpenAI API.
+
+    Args:
+        cat_1 (str): Name of the primary categorical column
+        cat_2 (str): Name of the secondary categorical column
+        num_col (str): Name of the numerical column for analysis
+        insights_json (Dict[str, Any]): JSON data containing the analysis dataset
+        api_key (str): OpenAI API key for authentication
+        max_retries (int, optional): Maximum number of retry attempts. Defaults to 3.
+
+    Returns:
+        Optional[Dict[str, str]]: Dictionary with 10 strategic insights (bullet_1 to bullet_10)
+                                 Returns None if the API call fails after all retries.
+
+    Raises:
+        ValueError: If required parameters are missing or invalid
+        requests.exceptions.RequestException: If API request fails permanently
+    """
+
+    # Input validation
+    if not all([cat_1, cat_2, num_col, api_key]):
+        raise ValueError("All parameters (cat_1, cat_2, num_col, api_key) are required and cannot be empty")
+
+    if not isinstance(insights_json, dict):
+        raise ValueError("insights_json must be a dictionary")
+
+    # Construct the analysis prompt
+    prompt = f"""
+Act as a senior strategic consultant specializing in commercial data analytics. Your mission is to transform numerical data into actionable insights that drive executive decision-making.
+
+Analysis Framework
+You are analyzing the quantitative variable "{num_col}" segmented by:
+
+Primary category: "{cat_1}"
+Secondary category: "{cat_2}"
+
+The dataset includes multilevel aggregations revealing:
+
+Total contributions and percentage distributions
+Concentration and dispersion patterns
+Structural market dynamics
+
+High-Quality Insight Guidelines
+## MUST INCLUDE:
+
+- Strategic implications: What does this mean for business strategy?
+- Concentration patterns: Identify dominance, fragmentation, or balance
+- Risk/opportunity analysis: Vulnerabilities and untapped potential
+- Competitive dynamics: Advantages, threats, and positioning
+- Implicit recommendations: What actions do the data suggest?
+- Market context: Interpret numbers within business realities
+
+## AVOID:
+
+- Data restatements without interpretation
+- Generic insights applicable to any dataset
+- Redundancy between points
+- Pure numerical focus without strategic context
+
+Insight Categories to Consider:
+
+Market Concentration: Dominance of specific segments
+Risk Diversification: Over-dependence on particular categories
+Growth Opportunities: Under-exploited segments with potential
+Resource Efficiency: Alignment between size and performance
+Competitive Dynamics: Entry barriers and structural advantages
+Strategic Vulnerabilities: Exposure to concentration risks
+Portfolio Optimization: Rebalancing and segment prioritization
+Emerging Trends: Patterns indicating market shifts
+Competitive Positioning: Relative strengths by segment
+Operational Implications: How data impacts operations
+
+Output Format (MANDATORY)
+Return ONLY a valid JSON object with exactly 10 keys:
+{{
+  "bullet_1": "Concise but profound strategic insight...",
+  "bullet_2": "Concise but profound strategic insight...",
+  ...
+  "bullet_10": "Concise but profound strategic insight..."
+}}
+
+CRITICAL REQUIREMENTS:
+- Return ONLY valid JSON
+- Each insight must be a complete, self-sufficient sentence
+- Maximum 25-30 words per insight for conciseness
+- Ensure each insight is unique with no overlap
+- Focus on strategic implications, not data description
+
+Data for Analysis
+{json.dumps(insights_json, indent=2)}
+"""
+
+    # API configuration
+    api_url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "gpt-5-mini",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    }
+
+    # Retry logic with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Making API request (attempt {attempt + 1}/{max_retries})")
+
+            response = requests.post(
+                api_url,
+                headers=headers,
+                json=payload
+            )
+
+            # Check if request was successful
+            response.raise_for_status()
+
+            # Parse response
+            response_data = response.json()
+
+            # Extract the insights from response
+            response_data = response.json()
+
+            if 'choices' in response_data and len(response_data['choices']) > 0:
+                insights_text = response_data['choices'][0]['message']['content']
+            else:
+                raise ValueError("Invalid response structure from OpenAI API")
+
+            # Parse JSON from the response
+            try:
+                # Clean potential markdown formatting
+                insights_text = insights_text.strip()
+                if insights_text.startswith('```json'):
+                    insights_text = insights_text[7:]
+                if insights_text.endswith('```'):
+                    insights_text = insights_text[:-3]
+
+                insights_dict = json.loads(insights_text.strip())
+
+                # Validate response structure
+                expected_keys = [f"bullet_{i}" for i in range(1, 11)]
+                if not all(key in insights_dict for key in expected_keys):
+                    raise ValueError("Response doesn't contain all required bullet points")
+
+                logger.info("Successfully generated strategic insights")
+                return insights_dict
+
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON response: {e}")
+                if attempt == max_retries - 1:
+                    raise ValueError(f"Invalid JSON response from API: {insights_text}")
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"Request timeout on attempt {attempt + 1}")
+            if attempt == max_retries - 1:
+                raise requests.exceptions.RequestException("API request timed out after all retries")
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Rate limit
+                wait_time = 2 ** attempt
+                logger.warning(f"Rate limit hit, waiting {wait_time} seconds before retry")
+                time.sleep(wait_time)
+            elif e.response.status_code >= 500:  # Server error
+                logger.warning(f"Server error {e.response.status_code}, retrying...")
+                time.sleep(2 ** attempt)
+            else:
+                logger.error(f"HTTP error {e.response.status_code}: {e}")
+                raise
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed on attempt {attempt + 1}: {e}")
+            if attempt == max_retries - 1:
+                raise
+
+        # Wait before retry (exponential backoff)
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt
+            logger.info(f"Waiting {wait_time} seconds before retry...")
+            time.sleep(wait_time)
+
+    logger.error("All retry attempts failed")
+    return None

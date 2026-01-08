@@ -12,7 +12,10 @@ except ImportError:
 
 from charts.insights_functions import (
     AVAILABLE_ESTIMATORS,
-    generate_comparison_insights
+    generate_multilevel_aggregations,
+    add_pareto_insights,
+    generate_comparison_insights,
+    generate_strategic_insights
 )
 
 from charts.common_functions import (
