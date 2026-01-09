@@ -2,6 +2,14 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from dotenv import load_dotenv
+import os
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+API_KEY = os.getenv('API_KEY')
 
 # Try to import scipy for smooth interpolation
 try:
@@ -12,24 +20,25 @@ except ImportError:
 
 from insights_functions import (
     AVAILABLE_ESTIMATORS,
-    generate_multilevel_aggregations,
-    add_pareto_insights,
-    generate_comparison_insights
+    generate_strategic_insights
 )
 
 from common_functions import (
+    get_scale_and_format_eur,
     format_eur_axis,
     format_regular_axis,
     format_category_name,
-    apply_outlier_filtering
+    format_value_consistent,
+    apply_outlier_filtering,
 )
 
 def plot_distributions_by_category(df, categorical_column, numeric_column, figsize=(8, 10),
                                    bandwidth=1.0, remove_outliers=True, percentile_range=(0.05, 0.95),
                                    transparent_bg=True, show_global_mean=True, n_ticks=6,
-                                   diff_from_mean=False):
+                                   diff_from_mean=False, openai=False):
     """
     Creates a distribution plot with KDE curves and quantile bands for each category.
+    Now returns both the plot and comprehensive analysis dictionary.
 
     Parameters:
     -----------
@@ -58,8 +67,16 @@ def plot_distributions_by_category(df, categorical_column, numeric_column, figsi
 
     Returns:
     --------
-    fig, axs : matplotlib figure and axes objects
+    tuple: (fig, axs, analysis_dict)
+        - fig: matplotlib figure object
+        - axs: matplotlib axes objects
+        - analysis_dict: comprehensive analysis dictionary
     """
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     # Define color palette for quantiles based on main purple color
     main_purple = '#7D4BEB'
     mid_purple = '#A284F0'    # Lighter version
@@ -68,22 +85,126 @@ def plot_distributions_by_category(df, categorical_column, numeric_column, figsi
 
     darkgrey = '#525252'
 
+    # Validate input columns
+    if categorical_column not in df.columns:
+        raise ValueError(f"Column '{categorical_column}' not found in DataFrame")
+    if numeric_column not in df.columns:
+        raise ValueError(f"Column '{numeric_column}' not found in DataFrame")
+    if not pd.api.types.is_numeric_dtype(df[numeric_column]):
+        raise ValueError(f"Column '{numeric_column}' must be numeric")
+
+    # Create copy and clean data
+    df_clean = df[[categorical_column, numeric_column]].copy().dropna()
+
+    if len(df_clean) == 0:
+        raise ValueError("No data remaining after removing NaN values")
+
     # Filter outliers if requested
-    df_plot = df.copy()
+    df_plot = df_clean.copy()
     if remove_outliers:
         df_plot = apply_outlier_filtering(df_plot, [numeric_column], percentile_range)
 
-    # Calculate global mean for all categories (before filtering outliers if show_global_mean is True)
-    if show_global_mean or diff_from_mean:
-        if remove_outliers:
-            global_mean = df_plot[numeric_column].mean()
-        else:
-            global_mean = df[numeric_column].mean()
+    global_mean = df_plot[numeric_column].mean()
+    global_median = df_plot[numeric_column].median()
+    total_companies = len(df_plot)
 
     # Get unique categories sorted by mean of numeric column
     categories = df_plot.groupby(categorical_column)[numeric_column].mean().sort_values().index.tolist()
     n_categories = len(categories)
 
+    if n_categories == 0:
+        raise ValueError("No categories found in data")
+
+    # Initialize analysis dictionary
+    analysis_dict = {
+        "global_analysis": {
+            "global_mean": global_mean,
+            "global_median": global_median,
+            "total_companies": total_companies,
+        },
+        "categories_analysis": {},
+        "insights": []
+    }
+
+    # Analyze each category
+    for category in categories:
+        subset = df_plot[df_plot[categorical_column] == category].copy()
+
+        if len(subset) == 0:
+            continue
+
+        # Basic statistics
+        cat_mean = subset[numeric_column].mean()
+        cat_median = subset[numeric_column].median()
+        cat_total_companies = len(subset)
+
+        # Distance to global mean
+        distance_absolute = (cat_mean - global_mean)
+
+        # Calculate 80% concentration
+        subset_sorted = subset.sort_values(numeric_column, ascending=False).copy()
+        subset_sorted['cumsum'] = subset_sorted[numeric_column].cumsum()
+        total_value = subset_sorted[numeric_column].sum()
+        target_value = total_value * 0.8
+
+        # Find how many companies represent 80% or more
+        companies_80_percent = 0
+        if total_value > 0:
+            companies_80_percent = len(subset_sorted[subset_sorted['cumsum'] <= target_value]) + 1
+            companies_80_percent = min(companies_80_percent, cat_total_companies)
+
+        concentration_ratio = companies_80_percent / cat_total_companies if cat_total_companies > 0 else 0
+
+        # Tercile analysis
+        cat_min = subset[numeric_column].min()
+        cat_max = subset[numeric_column].max()
+        cat_range = cat_max - cat_min
+
+        if cat_range > 0:
+            tercile_1_cutoff = cat_min + (cat_range / 3)
+            tercile_2_cutoff = cat_min + (2 * cat_range / 3)
+
+            companies_tercile_1 = len(subset[subset[numeric_column] <= tercile_1_cutoff])
+            companies_tercile_2 = len(subset[(subset[numeric_column] > tercile_1_cutoff) &
+                                           (subset[numeric_column] <= tercile_2_cutoff)])
+            companies_tercile_3 = len(subset[subset[numeric_column] > tercile_2_cutoff])
+        else:
+            # If all values are the same
+            tercile_1_cutoff = cat_min
+            tercile_2_cutoff = cat_min
+            companies_tercile_1 = cat_total_companies
+            companies_tercile_2 = 0
+            companies_tercile_3 = 0
+
+        # Store category analysis
+        analysis_dict["categories_analysis"][category] = {
+            "mean": cat_mean,
+            "median": cat_median,
+            "distance_to_global_mean": distance_absolute,
+            "companies_for_80_percent": companies_80_percent,
+            "total_companies": cat_total_companies,
+            "concentration_ratio": concentration_ratio,
+            "tercile_analysis": {
+                "min_value": cat_min,
+                "max_value": cat_max,
+                "tercile_1_cutoff": tercile_1_cutoff,
+                "tercile_2_cutoff": tercile_2_cutoff,
+                "companies_tercile_1": companies_tercile_1,
+                "companies_tercile_2": companies_tercile_2,
+                "companies_tercile_3": companies_tercile_3
+            }
+        }
+
+    # Generate insights
+    insights = generate_distribution_insights(analysis_dict, numeric_column, categorical_column)
+    analysis_dict["insights"] = insights
+    if openai is True:
+      insights = generate_strategic_insights(
+          categorical_column, None,numeric_column,insights,
+          API_KEY=API_KEY
+      )
+
+    # CREATE THE PLOT
     # Create subplots with transparent background if requested
     fig, axs = plt.subplots(nrows=n_categories, ncols=1, figsize=figsize)
 
@@ -119,6 +240,9 @@ def plot_distributions_by_category(df, categorical_column, numeric_column, figsi
 
         # Subset data for current category
         subset = df_plot[df_plot[categorical_column] == category]
+
+        if len(subset) == 0:
+            continue
 
         # Plot KDE distribution
         sns.kdeplot(
@@ -156,7 +280,7 @@ def plot_distributions_by_category(df, categorical_column, numeric_column, figsi
         if diff_from_mean:
             category_mean = subset[numeric_column].mean()
             # Calculate percentage difference: (category_mean - global_mean) / global_mean * 100
-            pct_diff = ((category_mean - global_mean) / global_mean) * 100
+            pct_diff = ((category_mean - global_mean) / global_mean) * 100 if global_mean != 0 else 0
 
             # Format the percentage with sign
             sign = '+' if pct_diff >= 0 else ''
@@ -233,13 +357,120 @@ def plot_distributions_by_category(df, categorical_column, numeric_column, figsi
     # Adjust layout
     plt.tight_layout()
 
-    return fig, axs
+    return fig, axs, analysis_dict
+
+def generate_distribution_insights(analysis_dict, numeric_column, categorical_column):
+    """
+    Generate insights from the distribution analysis.
+
+    Parameters:
+    -----------
+    analysis_dict : dict
+        Analysis dictionary with category statistics
+    numeric_column : str
+        Name of the numeric column
+    categorical_column : str
+        Name of the categorical column
+
+    Returns:
+    --------
+    list: List of generated insights
+    """
+    insights = []
+    categories_analysis = analysis_dict["categories_analysis"]
+    global_mean = analysis_dict["global_analysis"]["global_mean"]
+
+    if len(categories_analysis) == 0:
+        return insights
+
+    # Get formatting info for the numeric column
+    scale, suffix = get_scale_and_format_eur(
+        [data["mean"] for data in categories_analysis.values()],
+        numeric_column
+    )
+
+    def format_value_for_insight(value):
+        """Format value for insight text"""
+        return format_value_consistent(value, scale, suffix, numeric_column, 'mean')
+
+    # 1. TERCILE INSIGHTS for each category
+    for category, data in categories_analysis.items():
+        tercile = data["tercile_analysis"]
+
+        if tercile["companies_tercile_1"] > 0 or tercile["companies_tercile_2"] > 0 or tercile["companies_tercile_3"] > 0:
+            cutoff_1_formatted = format_value_for_insight(tercile["tercile_1_cutoff"])
+            cutoff_2_formatted = format_value_for_insight(tercile["tercile_2_cutoff"])
+
+            insight = (f"In {category}, we observe that there are "
+                      f"{tercile['companies_tercile_1']} companies below {cutoff_1_formatted}, "
+                      f"{tercile['companies_tercile_2']} companies between {cutoff_1_formatted} and {cutoff_2_formatted}, "
+                      f"and {tercile['companies_tercile_3']} companies above {cutoff_2_formatted}.")
+            insights.append(insight)
+
+    # 2. CONCENTRATION INSIGHTS
+    # Find category with highest and lowest concentration
+    concentration_data = {cat: data["concentration_ratio"] for cat, data in categories_analysis.items()}
+
+    if len(concentration_data) > 1:
+        highest_concentration_cat = max(concentration_data.keys(), key=lambda k: concentration_data[k])
+        lowest_concentration_cat = min(concentration_data.keys(), key=lambda k: concentration_data[k])
+
+        if highest_concentration_cat != lowest_concentration_cat:
+            highest_conc = categories_analysis[highest_concentration_cat]
+            lowest_conc = categories_analysis[lowest_concentration_cat]
+
+            insights.append(f"{highest_concentration_cat} shows the highest concentration: "
+                          f"only {highest_conc['concentration_ratio']:.1%} of companies "
+                          f"({highest_conc['companies_for_80_percent']} out of {highest_conc['total_companies']}) "
+                          f"account for 80% of the total {numeric_column.replace('_', ' ').lower()}.")
+
+            insights.append(f"{lowest_concentration_cat} shows the most distributed pattern: "
+                          f"{lowest_conc['concentration_ratio']:.1%} of companies "
+                          f"({lowest_conc['companies_for_80_percent']} out of {lowest_conc['total_companies']}) "
+                          f"are needed to reach 80% of the total {numeric_column.replace('_', ' ').lower()}.")
+
+    # 3. MEAN COMPARISON INSIGHTS
+    if len(categories_analysis) > 1:
+        mean_values = {cat: data["mean"] for cat, data in categories_analysis.items()}
+        highest_mean_cat = max(mean_values.keys(), key=lambda k: mean_values[k])
+        lowest_mean_cat = min(mean_values.keys(), key=lambda k: mean_values[k])
+
+        if highest_mean_cat != lowest_mean_cat:
+            highest_mean = mean_values[highest_mean_cat]
+            lowest_mean = mean_values[lowest_mean_cat]
+
+            if lowest_mean != 0:
+                ratio = highest_mean / lowest_mean
+                if ratio > 1.5:
+                    insights.append(f"The mean {numeric_column.replace('_', ' ').lower()} in {highest_mean_cat} "
+                                  f"is {ratio:.1f}x higher than in {lowest_mean_cat} "
+                                  f"({format_value_for_insight(highest_mean)} vs {format_value_for_insight(lowest_mean)}).")
+
+    # 5. COMPANY COUNT INSIGHTS
+    if len(categories_analysis) > 1:
+        company_counts = {cat: data["total_companies"] for cat, data in categories_analysis.items()}
+        largest_cat = max(company_counts.keys(), key=lambda k: company_counts[k])
+        smallest_cat = min(company_counts.keys(), key=lambda k: company_counts[k])
+
+        if largest_cat != smallest_cat:
+            largest_count = company_counts[largest_cat]
+            smallest_count = company_counts[smallest_cat]
+
+            if smallest_count > 0 and largest_count / smallest_count > 2:
+                insights.append(f"{largest_cat} contains the most companies ({largest_count}), "
+                              f"while {smallest_cat} contains the fewest ({smallest_count}).")
+
+    # Limit to avoid overwhelming the user
+    if len(insights) > 10:
+        insights = insights[:10]
+
+    return insights
 
 def create_custom_kde_plot(data, numeric_column, categorical_column, percentile_range=(0, 1),
                           figsize=(12, 6), alpha=0.4, common_norm=False, n_ticks=5,
-                          custom_colors=None):
+                          custom_colors=None,openai=False):
     """
-    Create a customized KDE plot with transparent background and hidden Y-axis.
+    Create a customized KDE plot with transparent background, hidden Y-axis, and comprehensive analysis.
 
     Parameters:
     -----------
@@ -267,11 +498,16 @@ def create_custom_kde_plot(data, numeric_column, categorical_column, percentile_
 
     Returns:
     --------
-    matplotlib.figure.Figure, matplotlib.axes.Axes
-        The created figure and axes objects
+    tuple: (fig, ax, analysis_dict)
+        - fig: matplotlib figure object
+        - ax: matplotlib axes object
+        - analysis_dict: comprehensive analysis dictionary
     """
     import random
     import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import seaborn as sns
 
     # Validate inputs
     if not isinstance(percentile_range, (list, tuple)) or len(percentile_range) != 2:
@@ -299,15 +535,112 @@ def create_custom_kde_plot(data, numeric_column, categorical_column, percentile_
 
     if len(filtered_data) == 0:
         print(f"Warning: No data found after applying percentile range [{lower_pct}, {upper_pct}]")
-        return None
+        return None, None, None
+
+    # Calculate global statistics
+    global_mean = filtered_data[numeric_column].mean()
+    global_median = filtered_data[numeric_column].median()
+    total_companies = len(filtered_data)
 
     # Calculate the actual range after filtering for axis limits
     min_val = filtered_data[numeric_column].min()
     max_val = filtered_data[numeric_column].max()
 
-    # Get unique categories to determine how many colors we need
-    unique_categories = filtered_data[categorical_column].unique()
-    n_categories = len(unique_categories)
+    # Get unique categories sorted by mean of numeric column
+    categories = filtered_data.groupby(categorical_column)[numeric_column].mean().sort_values().index.tolist()
+    n_categories = len(categories)
+
+    if n_categories == 0:
+        raise ValueError("No categories found in data")
+
+    # Initialize analysis dictionary
+    analysis_dict = {
+        "global_analysis": {
+            "global_mean": global_mean,
+            "global_median": global_median,
+            "total_companies": total_companies,
+        },
+        "categories_analysis": {},
+        "insights": []
+    }
+
+    # Analyze each category
+    for category in categories:
+        subset = filtered_data[filtered_data[categorical_column] == category].copy()
+
+        if len(subset) == 0:
+            continue
+
+        # Basic statistics
+        cat_mean = subset[numeric_column].mean()
+        cat_median = subset[numeric_column].median()
+        cat_total_companies = len(subset)
+
+        # Distance to global mean
+        distance_absolute = (cat_mean - global_mean)
+
+        # Calculate 80% concentration
+        subset_sorted = subset.sort_values(numeric_column, ascending=False).copy()
+        subset_sorted['cumsum'] = subset_sorted[numeric_column].cumsum()
+        total_value = subset_sorted[numeric_column].sum()
+        target_value = total_value * 0.8
+
+        # Find how many companies represent 80% or more
+        companies_80_percent = 0
+        if total_value > 0:
+            companies_80_percent = len(subset_sorted[subset_sorted['cumsum'] <= target_value]) + 1
+            companies_80_percent = min(companies_80_percent, cat_total_companies)
+
+        concentration_ratio = companies_80_percent / cat_total_companies if cat_total_companies > 0 else 0
+
+        # Tercile analysis
+        cat_min = subset[numeric_column].min()
+        cat_max = subset[numeric_column].max()
+        cat_range = cat_max - cat_min
+
+        if cat_range > 0:
+            tercile_1_cutoff = cat_min + (cat_range / 3)
+            tercile_2_cutoff = cat_min + (2 * cat_range / 3)
+
+            companies_tercile_1 = len(subset[subset[numeric_column] <= tercile_1_cutoff])
+            companies_tercile_2 = len(subset[(subset[numeric_column] > tercile_1_cutoff) &
+                                           (subset[numeric_column] <= tercile_2_cutoff)])
+            companies_tercile_3 = len(subset[subset[numeric_column] > tercile_2_cutoff])
+        else:
+            # If all values are the same
+            tercile_1_cutoff = cat_min
+            tercile_2_cutoff = cat_min
+            companies_tercile_1 = cat_total_companies
+            companies_tercile_2 = 0
+            companies_tercile_3 = 0
+
+        # Store category analysis
+        analysis_dict["categories_analysis"][category] = {
+            "mean": cat_mean,
+            "median": cat_median,
+            "distance_to_global_mean": distance_absolute,
+            "companies_for_80_percent": companies_80_percent,
+            "total_companies": cat_total_companies,
+            "concentration_ratio": concentration_ratio,
+            "tercile_analysis": {
+                "min_value": cat_min,
+                "max_value": cat_max,
+                "tercile_1_cutoff": tercile_1_cutoff,
+                "tercile_2_cutoff": tercile_2_cutoff,
+                "companies_tercile_1": companies_tercile_1,
+                "companies_tercile_2": companies_tercile_2,
+                "companies_tercile_3": companies_tercile_3
+            }
+        }
+
+    # Generate insights using the same function as the original
+    insights = generate_distribution_insights(analysis_dict, numeric_column, categorical_column)
+    analysis_dict["insights"] = insights
+    if openai is True:
+      insights = generate_strategic_insights(
+          categorical_column, None,numeric_column,insights,
+          API_KEY=API_KEY
+      )
 
     # Handle custom colors
     if custom_colors is not None:
@@ -391,4 +724,4 @@ def create_custom_kde_plot(data, numeric_column, categorical_column, percentile_
     ax.set_title('')
 
     plt.tight_layout()
-    return fig, ax
+    return fig, ax, analysis_dict

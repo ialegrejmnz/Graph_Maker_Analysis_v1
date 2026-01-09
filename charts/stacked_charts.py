@@ -5,6 +5,14 @@ import seaborn as sns
 import re
 from matplotlib.patches import Rectangle, Ellipse
 from typing import Optional, Dict, Tuple, Union
+from dotenv import load_dotenv
+import os
+
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+API_KEY = os.getenv('API_KEY')
 
 # Try to import scipy for smooth interpolation
 try:
@@ -17,7 +25,7 @@ from insights_functions import (
     AVAILABLE_ESTIMATORS,
     generate_multilevel_aggregations,
     add_pareto_insights,
-    generate_comparison_insights
+    generate_strategic_insights
 )
 
 from common_functions import (
@@ -129,7 +137,7 @@ def _create_oval_title_standalone(estimator, variable_name):
     return f"{estimator.title()} {variable_name}"
 
 def plot_financial_stacked_barplot(df, numeric_column, categorical_column, stack_column, estimator='mean',
-                                 figsize=(12, 7), rotation=45, horizontal_params=None, vertical_params=None):
+                                 figsize=(12, 7), rotation=45, horizontal_params=None, vertical_params=None,openai=False):
     """
     Creates a stacked bar plot for financial data grouped by category and sub-category with enhanced formatting.
 
@@ -210,6 +218,11 @@ def plot_financial_stacked_barplot(df, numeric_column, categorical_column, stack
 
     insights = generate_multilevel_aggregations(df_base, categorical_column, stack_column, numeric_column, estimator, values="percentages")
     insights_JSON = add_pareto_insights(insights)
+    if openai is True:
+      insights_JSON = generate_strategic_insights(
+          categorical_column, stack_column,numeric_column,insights_JSON,
+          API_KEY=API_KEY
+      )
 
     if df_base.empty:
         raise ValueError("No valid data after removing null values from essential columns")
@@ -551,7 +564,7 @@ def plot_financial_stacked_barplot(df, numeric_column, categorical_column, stack
     return ax, insights_JSON
 
 def plot_financial_stacked_barplot_100(df, numeric_column, categorical_column, stack_column, estimator='mean',
-                                       figsize=(12, 7), rotation=45, horizontal_params=None, vertical_params=None):
+                                       figsize=(12, 7), rotation=45, horizontal_params=None, vertical_params=None,openai=False):
     """
     Creates a 100% stacked bar plot for financial data grouped by category and sub-category with enhanced formatting.
     Now handles negative values correctly by normalizing bar heights to 100% while preserving original percentages in labels.
@@ -629,6 +642,11 @@ def plot_financial_stacked_barplot_100(df, numeric_column, categorical_column, s
 
     insights = generate_multilevel_aggregations(df_base, categorical_column, stack_column, numeric_column, estimator, values="percentages")
     insights_JSON = add_pareto_insights(insights)
+    if openai is True:
+      insights_JSON = generate_strategic_insights(
+          categorical_column, stack_column,numeric_column,insights_JSON,
+          API_KEY=API_KEY
+      )
 
     if df_base.empty:
         raise ValueError("No valid data after removing null values from essential columns")
@@ -981,8 +999,7 @@ def plot_financial_stacked_barplot_100(df, numeric_column, categorical_column, s
     return ax, insights_JSON
 
 def plot_financial_mekko_chart_100(df, numeric_column, categorical_column, stack_column,
-                                   figsize=(14, 8), rotation=45,
-                                   horizontal_params=None, vertical_params=None):
+                                   figsize=(14, 8), rotation=45,horizontal_params=None, vertical_params=None,openai=False):
     """
     Creates a 100% MEKKO Chart (Marimekko) for financial data with rescaled percentages.
 
@@ -1056,6 +1073,11 @@ def plot_financial_mekko_chart_100(df, numeric_column, categorical_column, stack
     # Note: For MEKKO charts, we use 'sum' as the default estimator
     insights = generate_multilevel_aggregations(df_base, categorical_column, stack_column, numeric_column, 'sum', values="percentages")
     insights_JSON = add_pareto_insights(insights)
+    if openai is True:
+      insights_JSON = generate_strategic_insights(
+          categorical_column, stack_column,numeric_column,insights_JSON,
+          API_KEY=API_KEY
+      )
 
     # Convert categorical columns to strings and handle NaN/None values
     df_base[categorical_column] = df_base[categorical_column].astype(str).replace(['nan', 'None', ''], 'Unknown')

@@ -14,6 +14,12 @@ from sklearn.metrics import r2_score
 import warnings
 from typing import Optional, Dict, Tuple, Union
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+API_KEY = os.getenv('API_KEY')
+
 # Try to import scipy for smooth interpolation
 try:
     from scipy import interpolate
@@ -25,18 +31,14 @@ from insights_functions import (
     AVAILABLE_ESTIMATORS,
     generate_multilevel_aggregations,
     add_pareto_insights,
-    generate_comparison_insights
+    generate_strategic_insights
 )
 
 from common_functions import (
     get_scale_and_format_eur,
-    format_eur_axis,
-    format_regular_axis,
-    format_category_name,
     format_value_consistent,
     generate_intelligent_ylabel,
     setup_chart_style,
-    save_plot_with_transparency,
     create_custom_color_palette,
     apply_outlier_filtering,
     interpolate_missing_values
@@ -579,7 +581,7 @@ class FinancialTimeSeriesPlotter:
 
     def plot(self, metric, categorical_column=None, figsize=(14, 8),
              show_confidence=False, smooth_line=True, show_points=False,
-             subplot_layout=None):
+             subplot_layout=None,openai=False):
         """
         Create time series plot and return insights
 
@@ -590,14 +592,14 @@ class FinancialTimeSeriesPlotter:
         plt.style.use('default')
 
         if categorical_column is None:
-            ax, insights = self._plot_single(metric, figsize, show_confidence, smooth_line, show_points)
+            ax, insights = self._plot_single(metric, figsize, show_confidence, smooth_line, show_points,openai)
         else:
             ax, insights = self._plot_categorical(metric, categorical_column, figsize,
-                                                show_confidence, smooth_line, show_points, subplot_layout)
+                                                show_confidence, smooth_line, show_points, subplot_layout,openai)
 
         return ax, insights
 
-    def _plot_single(self, metric, figsize, show_confidence, smooth_line, show_points):
+    def _plot_single(self, metric, figsize, show_confidence, smooth_line, show_points,openai=False):
         """Create single time series plot with mean line and individual complete series"""
         data = self._prepare_data(metric)
 
@@ -607,6 +609,11 @@ class FinancialTimeSeriesPlotter:
 
         # Calculate insights
         insights = self._calculate_insights(data, metric)
+        if openai is True:
+          insights = generate_strategic_insights(
+              None, None,metric,insights,
+              API_KEY=API_KEY
+          )
 
         # Create figure with transparent background
         fig, ax = plt.subplots(figsize=figsize, facecolor='none')
@@ -702,7 +709,7 @@ class FinancialTimeSeriesPlotter:
         return ax, insights
 
     def _plot_categorical(self, metric, categorical_column, figsize,
-                     show_confidence, smooth_line, show_points, subplot_layout=None):
+                     show_confidence, smooth_line, show_points, subplot_layout=None,openai=False):
         """Create categorical time series plots with mean lines and individual complete series"""
         data_dict = self._prepare_categorical_data(metric, categorical_column)
 
@@ -713,6 +720,11 @@ class FinancialTimeSeriesPlotter:
 
         # Calculate insights for categorical data
         insights = self._calculate_categorical_insights(data_dict, metric)
+        if openai is True:
+          insights = generate_strategic_insights(
+              categorical_column, None,metric,insights,
+              API_KEY=API_KEY
+          )
 
         n_categories = len(data_dict)
         n_rows, n_cols, layout_list = self._calculate_subplot_layout(n_categories, subplot_layout)
@@ -843,7 +855,6 @@ class FinancialTimeSeriesPlotter:
 
         return axes, insights
 
-
 def plot_timeseries(df, metric, categorical_column=None, figsize=(14, 8),
                    subplot_layout=None, show_points=False, percentile_range=(0.005, 0.90), **kwargs):
     """
@@ -856,7 +867,6 @@ def plot_timeseries(df, metric, categorical_column=None, figsize=(14, 8),
     plotter = FinancialTimeSeriesPlotter(df, percentile_range=percentile_range)
     return plotter.plot(metric, categorical_column, figsize, subplot_layout=subplot_layout,
                        show_points=show_points, **kwargs)
-
 
 def get_options(df, percentile_range=(0.005, 0.90)):
     """See available metrics and categorical columns"""
@@ -986,6 +996,190 @@ class StackedSumBarchart:
 
         return None
 
+    def _calculate_cagr_with_custom_logic(self, value1, value2, diff):
+        """
+        Calculate CAGR using the custom logic provided
+        """
+        import numpy as np
+        import pandas as pd
+
+        def real_power(base, exponent):
+            """Safe power calculation handling negative bases"""
+            if base > 0:
+                return base ** exponent
+            elif base < 0:
+                # For negative bases, only allow integer exponents in standard math
+                # For fractional exponents, we'll use absolute value
+                return -(abs(base) ** exponent)
+            else:
+                return 0
+
+        # Check for null values
+        if pd.isna(value1) or pd.isna(value2):
+            return np.nan, 'null'
+
+        # Check for division by zero
+        if value2 == 0:
+            return np.nan, 'zero_division'
+
+        # Determine which formula to use based on signs
+        value1_positive = value1 > 0
+        value2_positive = value2 > 0
+
+        # Case 1: Both values are positive - Standard formula
+        if value1_positive and value2_positive:
+            try:
+                cagr = real_power(value1 / value2, 1/diff) - 1
+                return cagr, 'standard'
+            except (ValueError, ZeroDivisionError, OverflowError):
+                return np.nan, 'error'
+
+        # Case 2: Both values are negative - Special formula for both negative
+        elif not value1_positive and not value2_positive:
+            try:
+                numerator = value1 - value2 + abs(value2)
+                denominator = abs(value2)
+
+                # Check for division by zero
+                if denominator == 0:
+                    return np.nan, 'zero_division'
+
+                base_ratio = numerator / denominator
+                cagr = real_power(base_ratio, 1/diff) - 1
+                return cagr, 'both_negative'
+            except (ValueError, ZeroDivisionError, OverflowError):
+                return np.nan, 'error'
+
+        # Case 3: Sign change (one positive, one negative) - NEW LOGIC
+        else:
+            try:
+                # Identify the negative value
+                negative_value = value1 if value1 < 0 else value2
+
+                # Calculate the correction factor: double the absolute value of the negative value
+                correction = 2 * abs(negative_value)
+
+                # Apply correction to both values
+                corrected_value1 = value1 + correction
+                corrected_value2 = value2 + correction
+
+                # Check for division by zero after correction
+                if corrected_value2 == 0:
+                    return np.nan, 'zero_division'
+
+                # Apply standard formula with corrected values
+                cagr = real_power(corrected_value1 / corrected_value2, 1/diff) - 1
+                return cagr, 'sign_corrected'
+            except (ValueError, ZeroDivisionError, OverflowError):
+                return np.nan, 'error'
+
+    def _calculate_category_cagrs(self, pivot_data):
+        """
+        Calculate CAGR for each category in the pivot_data
+
+        Parameters:
+        -----------
+        pivot_data : pandas.DataFrame
+            DataFrame with Years as index and categories as columns
+
+        Returns:
+        --------
+        dict
+            Dictionary with category names as keys and CAGR info as values
+            Format: {category: {'cagr': value, 'method': method, 'years_span': diff, 'value1': recent, 'value2': oldest}}
+        """
+        import pandas as pd
+        import numpy as np
+
+        cagr_results = {}
+
+        for category in pivot_data.columns:
+            category_data = pivot_data[category].copy()
+
+            # Remove zero and NaN values
+            non_zero_data = category_data[(category_data != 0) & (~pd.isna(category_data))]
+
+            if len(non_zero_data) < 2:
+                # Not enough data points for CAGR calculation
+                cagr_results[category] = {
+                    'cagr': np.nan,
+                    'method': 'insufficient_data',
+                    'years_span': 0,
+                    'value1': np.nan,
+                    'value2': np.nan
+                }
+                continue
+
+            # Sort by year index to get oldest and most recent
+            non_zero_data_sorted = non_zero_data.sort_index()
+
+            # Get oldest and most recent values
+            oldest_year = non_zero_data_sorted.index[0]
+            recent_year = non_zero_data_sorted.index[-1]
+
+            value2 = non_zero_data_sorted.iloc[0]  # Oldest (value2)
+            value1 = non_zero_data_sorted.iloc[-1]  # Most recent (value1)
+
+            # Calculate year difference
+            diff = abs(recent_year - oldest_year)
+
+            if diff == 0:
+                # Same year, no growth calculation possible
+                cagr_results[category] = {
+                    'cagr': 0.0,
+                    'method': 'same_year',
+                    'years_span': 0,
+                    'value1': value1,
+                    'value2': value2
+                }
+                continue
+
+            # Calculate CAGR using custom logic
+            cagr_value, method = self._calculate_cagr_with_custom_logic(value1, value2, diff)
+
+            cagr_results[category] = {
+                'cagr': cagr_value,
+                'method': method,
+                'years_span': diff,
+                'value1': value1,
+                'value2': value2,
+                'oldest_year': oldest_year,
+                'recent_year': recent_year
+            }
+
+        return cagr_results
+
+    def _format_cagr_value(self, cagr_value):
+        """
+        Format CAGR value for display in ovals
+
+        Parameters:
+        -----------
+        cagr_value : float
+            CAGR value (as decimal, e.g., 0.15 for 15%)
+
+        Returns:
+        --------
+        str
+            Formatted CAGR string (e.g., "15.3%" or "N/A")
+        """
+        import pandas as pd
+        import numpy as np
+
+        if pd.isna(cagr_value) or np.isinf(cagr_value):
+            return "N/A"
+
+        # Convert to percentage and format
+        percentage = cagr_value * 100
+
+        # Format with appropriate decimal places
+        if abs(percentage) < 0.1:
+            return f"{percentage:.2f}%"
+        elif abs(percentage) < 10:
+            return f"{percentage:.1f}%"
+        else:
+            return f"{percentage:.0f}%"
+
     def _apply_metric_outlier_filtering(self, metric):
         """Apply percentile-based outlier filtering only to columns of the specified metric"""
         if self.percentile_range is None or metric not in self.metric_mappings:
@@ -1066,7 +1260,6 @@ class StackedSumBarchart:
                 # Group by category and apply estimator
                 category_metrics = df_subset.groupby(categorical_column)[col].agg(AVAILABLE_ESTIMATORS[est])
 
-            # 🔥 NEW: Filter by final_categories if provided
             if final_categories is not None:
                 # Only keep categories that appear in the final chart
                 available_categories = [cat for cat in final_categories if cat in category_metrics.index]
@@ -1091,7 +1284,8 @@ class StackedSumBarchart:
                 'categories': category_metrics.index.tolist(),
                 'scale': col_scale,
                 'suffix': col_suffix,
-                'formatted_values': [self._format_oval_value(v, col_scale, col_suffix) for v in category_metrics.values]
+                # 🔥 NUEVO: Pass estimator to formatting function
+                'formatted_values': [self._format_oval_value(v, col_scale, col_suffix, est) for v in category_metrics.values]
             })
 
         return vertical_data
@@ -1099,7 +1293,7 @@ class StackedSumBarchart:
     def _calculate_horizontal_params(self, result_df, horizontal_params, metric):
         """
         Calculate horizontal oval metrics from processed data (after interpolation)
-        Now includes custom titles and formatting.
+        Now includes custom titles, formatting, and estimator passing.
         """
         if not horizontal_params:
             return []
@@ -1117,7 +1311,8 @@ class StackedSumBarchart:
             if not year_metrics.empty:
                 year_values = year_metrics.values
                 col_scale, col_suffix = self._get_custom_scale_and_suffix(year_values)
-                formatted_values = [self._format_oval_value(v, col_scale, col_suffix) for v in year_values]
+                # 🔥 NUEVO: Pass estimator to formatting function
+                formatted_values = [self._format_oval_value(v, col_scale, col_suffix, est) for v in year_values]
             else:
                 year_values = np.array([])
                 col_scale, col_suffix = 1, ''
@@ -1174,9 +1369,9 @@ class StackedSumBarchart:
         else:                         # Units
             return 1, ''
 
-    def _format_oval_value(self, value, scale, suffix):
+    def _format_oval_value(self, value, scale, suffix, estimator='sum'):
         """
-        Format a value for display in ovals.
+        Format a value for display in ovals with special handling for count estimator.
 
         Parameters:
         -----------
@@ -1186,6 +1381,8 @@ class StackedSumBarchart:
             Scale factor (1, 1e3, 1e6, 1e9)
         suffix : str
             Suffix string ('', 'K', 'Mn', 'Bn')
+        estimator : str, default 'sum'
+            Statistical estimator used ('sum', 'mean', 'median', 'count', etc.)
 
         Returns:
         --------
@@ -1194,14 +1391,19 @@ class StackedSumBarchart:
 
         Examples:
         ---------
-        9340000, 1e6, 'Mn' → '9.34Mn'
-        4650, 1e3, 'K' → '4.65K'
-        123, 1, '' → '123'
-        45.67, 1, '' → '45.67'
+        9340000, 1e6, 'Mn', 'sum' → '9.34Mn'
+        4650, 1e3, 'K', 'mean' → '4.65K'
+        1500, 1e3, 'K', 'count' → '1500' (always raw integer for count, no scaling)
+        45.67, 1, '', 'sum' → '45.67'
         """
         if value is None or (isinstance(value, float) and np.isnan(value)):
             return '0'
 
+        # 🔥 NUEVO: Special handling for count estimator - NEVER apply scaling, always show raw integers
+        if estimator.lower() == 'count':
+            return f"{int(value)}"  # Always show raw value as integer, no scaling or suffix
+
+        # Original logic for other estimators
         scaled_value = value / scale
 
         if suffix == '':  # No suffix, format based on decimal places
@@ -1209,8 +1411,8 @@ class StackedSumBarchart:
                 return f"{int(scaled_value)}"
             else:
                 return f"{scaled_value:.2f}"
-        else:  # Has suffix, always use 2 decimal places
-                return f"{scaled_value:.2f}{suffix}"
+        else:  # Has suffix, always use 2 decimal places for non-count
+            return f"{scaled_value:.2f}{suffix}"
 
     def _create_oval_title(self, estimator, variable_name):
         """
@@ -1337,7 +1539,7 @@ class StackedSumBarchart:
             sort_cols.append(categorical_column)
         melted_df = melted_df.sort_values(sort_cols).reset_index(drop=True)
 
-        # 🔥 NEW: Get final categories that will appear in the chart
+        # Get final categories that will appear in the chart
         final_categories = None
         if categorical_column is not None and not melted_df.empty:
             final_categories = sorted(melted_df[categorical_column].unique())
@@ -1395,7 +1597,6 @@ def prepare_stacked_data(df, metric, categorical_column=None, percentile_range=(
       processor = StackedSumBarchart(df, percentile_range=percentile_range)
       return processor.process_data(metric, categorical_column)
 
-
 def get_stacked_options(df, percentile_range=(0.005, 0.90)):
       """
       See available metrics and categorical columns for stacked charts
@@ -1410,12 +1611,13 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                                               estimator='sum', figsize=(12, 7), rotation=45,
                                               percentile_range=(0.005, 0.90),
                                               horizontal_params=None, vertical_params=None,
-                                              chart_type='regular'):
+                                              chart_type='regular', CAGR_oval=False, openai=False):
     """
     Creates a stacked bar plot directly from time series financial data with integrated processing.
 
     This function combines the StackedSumBarchart processing with the plotting functionality
-    to create stacked bar charts in a single call. Now supports oval metrics for additional insights.
+    to create stacked bar charts in a single call. Now supports oval metrics for additional insights
+    and CAGR calculations.
 
     Parameters:
     -----------
@@ -1447,11 +1649,16 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         Shows aggregated values by category
     chart_type : str, default 'regular'
         Type of stacked chart: 'regular', '100%', or 'mekko'
+    CAGR_oval : bool, default False
+        Whether to display CAGR ovals on the right side of the chart.
+        CAGR insights are always calculated and included in the returned insights regardless of this parameter.
 
     Returns:
     --------
-    matplotlib.axes.Axes
-        Axes object of the created plot
+    tuple
+        (matplotlib.axes.Axes, dict)
+        - Axes object of the created plot
+        - Dictionary with insights including CAGR information for each category
     """
     import matplotlib.pyplot as plt
     import pandas as pd
@@ -1459,7 +1666,6 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
     from matplotlib.patches import Ellipse
 
     # Step 1: Process the data using StackedSumBarchart
-    print(f"📊 Processing time series data for metric: {metric}")
     processor = StackedSumBarchart(df, percentile_range=percentile_range)
 
     # Validate that the metric exists
@@ -1472,7 +1678,6 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         result_df, horizontal_data, vertical_data = processor.process_data(
             metric, categorical_column, horizontal_params, vertical_params
         )
-        print(f"🎯 Oval metrics calculated - Horizontal: {len(horizontal_data)}, Vertical: {len(vertical_data)}")
     else:
         result_df = processor.process_data(metric, categorical_column)
         horizontal_data = []
@@ -1481,12 +1686,69 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
     if result_df.empty:
         raise ValueError(f"No data available after processing metric '{metric}' with category '{categorical_column}'")
 
-    print(f"✅ Data processed successfully. Shape: {result_df.shape}")
-    print(f"📅 Years found: {sorted(result_df['Year'].unique())}")
-    print(f"🏷️ Categories found: {sorted(result_df[categorical_column].unique())}")
+    # Generate base insights
+    insights_stacked_time_Series = generate_multilevel_aggregations(result_df, categorical_column, 'Year', metric, estimator, values="percentages")
+    insights_JSON = add_pareto_insights(insights_stacked_time_Series)
 
-    # Step 2: Create the chart based on chart_type with integrated plotting
-    print(f"🎨 Creating {chart_type} stacked bar chart...")
+    # Prepare pivot data for CAGR calculation and chart creation
+    pivot_data = result_df.pivot_table(
+        index='Year',
+        columns=categorical_column,
+        values=metric,
+        aggfunc=AVAILABLE_ESTIMATORS[estimator],
+        fill_value=0
+    )
+
+    if pivot_data.empty:
+        raise ValueError("No data available for plotting after pivot operation")
+
+    # Always calculate CAGR for insights (regardless of CAGR_oval parameter)
+    cagr_results = processor._calculate_category_cagrs(pivot_data)
+
+    # Add CAGR information to insights
+    for category_name, cagr_info in cagr_results.items():
+        key = f"CAGR value for {category_name}"
+        insights_JSON[key] = cagr_info['cagr']
+
+    if openai is True:
+          insights_JSON = generate_strategic_insights(
+              categorical_column, 'Year',metric,insights_JSON,
+              API_KEY=API_KEY
+          )
+
+    # Prepare CAGR oval data if CAGR_oval=True
+    cagr_oval_data = []
+    if CAGR_oval and categorical_column:
+
+        # Get final categories for consistency
+        final_categories = sorted(result_df[categorical_column].unique())
+
+        # Prepare CAGR data for ovals
+        cagr_values = []
+        cagr_formatted = []
+        cagr_categories = []
+
+        for category in final_categories:
+            if category in cagr_results:
+                cagr_value = cagr_results[category]['cagr']
+                formatted_cagr = processor._format_cagr_value(cagr_value)
+            else:
+                cagr_value = np.nan
+                formatted_cagr = "N/A"
+
+            cagr_values.append(cagr_value)
+            cagr_formatted.append(formatted_cagr)
+            cagr_categories.append(category)
+
+        cagr_oval_data = [{
+            'estimator': 'cagr',
+            'title': 'CAGR',
+            'values': cagr_values,
+            'categories': cagr_categories,
+            'formatted_values': cagr_formatted,
+            'scale': 1,  # CAGR is already in percentage format
+            'suffix': ''
+        }]
 
     if chart_type.lower() in ['100%', '100', 'percentage', 'normalized']:
         # ================================
@@ -1494,18 +1756,6 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         # ================================
 
         fig, ax = plt.subplots(figsize=figsize)
-
-        # Prepare data for 100% stacked chart
-        pivot_data = result_df.pivot_table(
-            index='Year',
-            columns=categorical_column,
-            values=metric,
-            aggfunc=AVAILABLE_ESTIMATORS[estimator],
-            fill_value=0
-        )
-
-        if pivot_data.empty:
-            raise ValueError("No data available for plotting after pivot operation")
 
         # Convert to percentages
         pivot_percentage = pivot_data.div(pivot_data.sum(axis=1), axis=0) * 100
@@ -1573,7 +1823,8 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         ax = setup_chart_style(ax)
 
         # Add legend with different positions based on params
-        if horizontal_data or vertical_data:
+        has_right_ovals = bool(horizontal_data or vertical_data or cagr_oval_data)
+        if has_right_ovals:
             ax.legend(loc='lower left', bbox_to_anchor=(-0.35, 0.5), frameon=False, fontsize=10)
         else:
             ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10)
@@ -1587,12 +1838,17 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         ax.set_axisbelow(True)
 
         # ================================
-        # ADD HORIZONTAL OVALS - IMPROVED
+        # ADD HORIZONTAL OVALS - IMPROVED (100% CHART)
         # ================================
         if horizontal_data:
-            oval_base_y = 115  # Start ovals 15% above 100% mark
-            oval_height = 6    # Reduced height for more oval shape
-            oval_spacing = 12  # Fixed spacing between oval rows
+            chart_height = 100
+            total_label_space = 8  # Space for total labels (3% offset + label height)
+            dynamic_offset = chart_height * 0.15  # 15% dynamic offset
+            oval_base_y = chart_height + total_label_space + dynamic_offset
+
+            # 🔥 MEJORA: Apply same values as first code
+            oval_height = 6    # Same as first code
+            oval_spacing = 12  # Same as first code
 
             for row_idx, h_data in enumerate(horizontal_data):
                 oval_y = oval_base_y + (row_idx * oval_spacing)
@@ -1603,22 +1859,13 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                 ax.text(-0.8, oval_y, title, ha='right', va='center',
                        fontsize=10, fontweight='normal', color='black')
 
-                # Use formatted_values if available, otherwise format on the fly
-                if 'formatted_values' in h_data and h_data['formatted_values']:
-                    formatted_values = h_data['formatted_values']
-                else:
-                    # Fallback: format values on the fly
-                    formatted_values = []
-                    for value in h_data.get('values', []):
-                        if h_data.get('suffix'):
-                            formatted_val = f"{value / h_data.get('scale', 1):.2f}{h_data['suffix']}"
-                        else:
-                            formatted_val = f"{value:.0f}" if value == int(value) else f"{value:.2f}"
-                        formatted_values.append(formatted_val)
+                # Use formatted_values (now includes count handling)
+                formatted_values = h_data.get('formatted_values', [])
 
                 # Add ovals for each year using formatted values
                 for i, (x_pos, formatted_value) in enumerate(zip(x_positions, formatted_values)):
-                    oval_width = 0.45  # Wider for more oval shape
+                    # 🔥 MEJORA: Apply same width as first code
+                    oval_width = 0.55  # Same width as vertical ovals
                     oval = Ellipse((x_pos, oval_y), oval_width, oval_height,
                                  facecolor='lightgray', edgecolor='gray',
                                  linewidth=0.5, alpha=0.8)
@@ -1634,29 +1881,34 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                 ax.set_ylim(0, top_oval_y * 1.05)
 
         # ================================
-        # ADD VERTICAL OVALS - IMPROVED
+        # ADD VERTICAL OVALS - IMPROVED (100% CHART)
         # ================================
-        if vertical_data:
+        # Combine vertical_data with CAGR ovals
+        all_vertical_data = vertical_data + cagr_oval_data
+
+        if all_vertical_data:
             chart_right = len(years) - 0.5
             vertical_oval_base_x = chart_right + 0.8
-            vertical_oval_width = 0.45   # Wider ovals (more width than height)
-            vertical_oval_height = 7     # Less height (shorter ovals)
-            vertical_oval_spacing = 0.6
+
+            # 🔥 MEJORA: Apply same values as first code
+            vertical_oval_width = 0.55   # Same as first code
+            vertical_oval_height = 7     # Same as first code
+            vertical_oval_spacing = 0.6  # Same as first code
 
             chart_height = 100
-            stack_spacing = 10   # Reduced spacing between ovals (closer together)
+            stack_spacing = 10   # Keep spacing between ovals of the same column
             total_stack_height = (len(categories) - 1) * stack_spacing
             vertical_oval_start_y = (chart_height - total_stack_height) / 2
 
-            for col_idx, v_data in enumerate(vertical_data):
+            for col_idx, v_data in enumerate(all_vertical_data):
                 oval_x = vertical_oval_base_x + (col_idx * vertical_oval_spacing)
 
                 # Use custom title from processed data with fallback
-                title = v_data.get('title', f"{v_data['estimator']} {v_data['column']}")
+                title = v_data.get('title', f"{v_data['estimator']} {v_data.get('column', '')}")
                 title_y = chart_height * 0.95
 
-                # Split long titles into multiple lines
-                max_chars_per_line = 10
+                # 🔥 FIXED: Improved title positioning to avoid overlap
+                max_chars_per_line = 8  # Reduced for better fit
                 words = title.split()
                 lines = []
                 current_line = []
@@ -1675,43 +1927,38 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                     lines.append(' '.join(current_line))
 
                 title_text = '\n'.join(lines)
-                ax.text(oval_x, title_y, title_text, ha='center', va='bottom',
-                       fontsize=10, fontweight='normal', color='black',
+                # 🔥 FIXED: Position titles closer to ovals, not too far above
+                title_y_closer = title_y - 5  # Bring titles closer to the ovals
+                ax.text(oval_x, title_y_closer, title_text, ha='center', va='bottom',
+                       fontsize=9, fontweight='normal', color='black',
                        rotation=0, multialignment='center')
 
-                # Use formatted_values if available, otherwise format on the fly
-                if 'formatted_values' in v_data and v_data['formatted_values']:
-                    formatted_values = v_data['formatted_values']
-                    categories_list = v_data.get('categories', categories)
-                else:
-                    # Fallback: format values on the fly
-                    formatted_values = []
-                    categories_list = v_data.get('categories', categories)
-                    for value in v_data.get('values', []):
-                        if v_data.get('suffix'):
-                            formatted_val = f"{value / v_data.get('scale', 1):.2f}{v_data['suffix']}"
-                        else:
-                            formatted_val = f"{value:.0f}" if value == int(value) else f"{value:.2f}"
-                        formatted_values.append(formatted_val)
+                # Use formatted_values if available
+                formatted_values = v_data.get('formatted_values', [])
+                categories_list = v_data.get('categories', categories)
 
                 # Add ovals for each category using formatted values
                 for i, (category, formatted_value) in enumerate(zip(categories_list, formatted_values)):
                     oval_y = vertical_oval_start_y + (i * stack_spacing)
 
-                    # Use appropriate color (match with bar colors)
+                    # Use appropriate color (match with bar colors for all ovals including CAGR)
                     color_index = i if i < len(colors) else i % len(colors)
+                    oval_color = colors[color_index]
+                    text_color = 'white'
+                    edge_color = 'white'
+
                     oval = Ellipse((oval_x, oval_y), vertical_oval_width, vertical_oval_height,
-                                 facecolor=colors[color_index], edgecolor='white',
+                                 facecolor=oval_color, edgecolor=edge_color,
                                  linewidth=1, alpha=0.9)
                     ax.add_patch(oval)
 
                     ax.text(oval_x, oval_y, formatted_value,
-                           ha='center', va='center', color='white',
+                           ha='center', va='center', color=text_color,
                            fontweight='bold', fontsize=9)
 
-            # Adjust xlim to accommodate vertical ovals
-            if vertical_data:
-                rightmost_oval_x = vertical_oval_base_x + ((len(vertical_data) - 1) * vertical_oval_spacing) + vertical_oval_width/2
+            # 🔥 MEJORA: Adjust xlim to accommodate vertical ovals
+            if all_vertical_data:
+                rightmost_oval_x = vertical_oval_base_x + ((len(all_vertical_data) - 1) * vertical_oval_spacing) + vertical_oval_width/2
                 ax.set_xlim(ax.get_xlim()[0], rightmost_oval_x * 1.05)
 
         plt.tight_layout()
@@ -1722,18 +1969,6 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         # ================================
 
         fig, ax = plt.subplots(figsize=figsize)
-
-        # Prepare data for regular stacked chart
-        pivot_data = result_df.pivot_table(
-            index='Year',
-            columns=categorical_column,
-            values=metric,
-            aggfunc=AVAILABLE_ESTIMATORS[estimator],
-            fill_value=0
-        )
-
-        if pivot_data.empty:
-            raise ValueError("No data available for plotting after pivot operation")
 
         # Get data for plotting
         x_positions = np.arange(len(pivot_data.index))
@@ -1782,7 +2017,8 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         ax = setup_chart_style(ax)
 
         # Add legend
-        if horizontal_data or vertical_data:
+        has_right_ovals = bool(horizontal_data or vertical_data or cagr_oval_data)
+        if has_right_ovals:
             ax.legend(loc='lower left', bbox_to_anchor=(-0.35, 0.5), frameon=False, fontsize=10)
         else:
             ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=10)
@@ -1795,12 +2031,16 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
         ax.grid(axis='y', alpha=0.3, linestyle='--')
         ax.set_axisbelow(True)
 
-        # Add horizontal ovals (similar to 100% version but adjusted for regular chart)
+        # ================================
+        # ADD HORIZONTAL OVALS - IMPROVED (REGULAR CHART)
+        # ================================
         if horizontal_data:
             chart_top = max(category_totals) if category_totals.size > 0 else 0
             oval_base_y = chart_top * 1.15
-            oval_height = chart_top * 0.05
-            oval_spacing = chart_top * 0.08
+
+            # 🔥 MEJORA: Apply proportional values for regular chart
+            oval_height = chart_top * 0.05  # Proportional to chart height
+            oval_spacing = chart_top * 0.08  # Proportional spacing
 
             for row_idx, h_data in enumerate(horizontal_data):
                 oval_y = oval_base_y + (row_idx * oval_spacing)
@@ -1809,61 +2049,55 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                 ax.text(-0.8, oval_y, title, ha='right', va='center',
                        fontsize=10, fontweight='normal', color='black')
 
-                # Use formatted_values if available, otherwise format on the fly
-                if 'formatted_values' in h_data and h_data['formatted_values']:
-                    for i, (x_pos, formatted_value) in enumerate(zip(x_positions, h_data['formatted_values'])):
-                        oval_width = 0.45
-                        oval = Ellipse((x_pos, oval_y), oval_width, oval_height,
-                                     facecolor='lightgray', edgecolor='gray',
-                                     linewidth=0.5, alpha=0.8)
-                        ax.add_patch(oval)
+                # Use formatted_values (now includes count handling)
+                formatted_values = h_data.get('formatted_values', [])
 
-                        ax.text(x_pos, oval_y, formatted_value,
-                               ha='center', va='center', color='black',
-                               fontweight='bold', fontsize=9)
-                else:
-                    # Fallback: format values on the fly
-                    for i, (x_pos, value) in enumerate(zip(x_positions, h_data['values'])):
-                        if h_data.get('suffix'):
-                            formatted_value = f"{value / h_data['scale']:.2f}{h_data['suffix']}"
-                        else:
-                            formatted_value = f"{value:.0f}" if value == int(value) else f"{value:.2f}"
+                for i, (x_pos, formatted_value) in enumerate(zip(x_positions, formatted_values)):
+                    # 🔥 MEJORA: Apply same width as first code
+                    oval_width = 0.55  # Same width as vertical ovals
+                    oval = Ellipse((x_pos, oval_y), oval_width, oval_height,
+                                 facecolor='lightgray', edgecolor='gray',
+                                 linewidth=0.5, alpha=0.8)
+                    ax.add_patch(oval)
 
-                        oval_width = 0.45
-                        oval = Ellipse((x_pos, oval_y), oval_width, oval_height,
-                                     facecolor='lightgray', edgecolor='gray',
-                                     linewidth=0.5, alpha=0.8)
-                        ax.add_patch(oval)
-
-                        ax.text(x_pos, oval_y, formatted_value,
-                               ha='center', va='center', color='black',
-                               fontweight='bold', fontsize=9)
+                    ax.text(x_pos, oval_y, formatted_value,
+                           ha='center', va='center', color='black',
+                           fontweight='bold', fontsize=9)
 
             # Adjust ylim
             if horizontal_data:
                 top_oval_y = oval_base_y + ((len(horizontal_data) - 1) * oval_spacing) + oval_height/2
                 ax.set_ylim(0, top_oval_y * 1.05)
 
-        # Add vertical ovals (similar to 100% version but adjusted for regular chart)
-        if vertical_data:
+        # ================================
+        # ADD VERTICAL OVALS - IMPROVED (REGULAR CHART)
+        # ================================
+        # Combine vertical_data with CAGR ovals
+        all_vertical_data = vertical_data + cagr_oval_data
+
+        if all_vertical_data:
             chart_right = len(years) - 0.5
             vertical_oval_base_x = chart_right + 0.8
-            vertical_oval_width = 0.25
-            vertical_oval_height = max(category_totals) * 0.08 if category_totals.size > 0 else 10
-            vertical_oval_spacing = 0.6
+
+            # 🔥 MEJORA: Apply same values as first code
+            vertical_oval_width = 0.55   # Same as first code
+            vertical_oval_height = max(category_totals) * 0.07 if category_totals.size > 0 else 7  # Proportionally adjusted
+            vertical_oval_spacing = 0.6  # Same as first code
 
             chart_height = max(category_totals) if category_totals.size > 0 else 100
-            stack_spacing = chart_height * 0.15
+            stack_spacing = chart_height * 0.10  # Adjusted for regular chart
             total_stack_height = (len(categories) - 1) * stack_spacing
             vertical_oval_start_y = (chart_height - total_stack_height) / 2
 
-            for col_idx, v_data in enumerate(vertical_data):
+            for col_idx, v_data in enumerate(all_vertical_data):
                 oval_x = vertical_oval_base_x + (col_idx * vertical_oval_spacing)
                 title = v_data['title']
 
                 # Add title above
                 title_y = chart_height * 0.95
-                max_chars_per_line = 10
+
+                # Split long titles into multiple lines (same as first code)
+                max_chars_per_line = 8  # Reduced for better fit
                 words = title.split()
                 lines = []
                 current_line = []
@@ -1882,26 +2116,34 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
                     lines.append(' '.join(current_line))
 
                 title_text = '\n'.join(lines)
-                ax.text(oval_x, title_y, title_text, ha='center', va='bottom',
-                       fontsize=10, fontweight='normal', color='black',
+                # 🔥 FIXED: Position titles closer to ovals, not too far above
+                title_y_closer = title_y - 5  # Bring titles closer to the ovals
+                ax.text(oval_x, title_y_closer, title_text, ha='center', va='bottom',
+                       fontsize=9, fontweight='normal', color='black',
                        multialignment='center')
 
-                # Add ovals
+                # Add ovals using formatted values (now includes count handling)
                 for i, (category, formatted_value) in enumerate(zip(v_data['categories'], v_data['formatted_values'])):
                     oval_y = vertical_oval_start_y + (i * stack_spacing)
 
+                    # Use appropriate color
+                    color_index = i if i < len(colors) else i % len(colors)
+                    oval_color = colors[color_index]
+                    text_color = 'white'
+                    edge_color = 'white'
+
                     oval = Ellipse((oval_x, oval_y), vertical_oval_width, vertical_oval_height,
-                                 facecolor=colors[i], edgecolor='white',
+                                 facecolor=oval_color, edgecolor=edge_color,
                                  linewidth=1, alpha=0.9)
                     ax.add_patch(oval)
 
                     ax.text(oval_x, oval_y, formatted_value,
-                           ha='center', va='center', color='white',
+                           ha='center', va='center', color=text_color,
                            fontweight='bold', fontsize=9)
 
-            # Adjust xlim
-            if vertical_data:
-                rightmost_oval_x = vertical_oval_base_x + ((len(vertical_data) - 1) * vertical_oval_spacing) + vertical_oval_width/2
+            # Adjust xlim to accommodate vertical ovals
+            if all_vertical_data:
+                rightmost_oval_x = vertical_oval_base_x + ((len(all_vertical_data) - 1) * vertical_oval_spacing) + vertical_oval_width/2
                 ax.set_xlim(ax.get_xlim()[0], rightmost_oval_x * 1.05)
 
         plt.tight_layout()
@@ -1909,5 +2151,9 @@ def plot_financial_timeseries_stacked_barplot(df, metric, categorical_column, st
     else:
         raise ValueError("chart_type must be 'regular', '100%', or 'mekko'")
 
-    print(f"✅ {chart_type.capitalize()} stacked bar chart created successfully!")
-    return ax
+    if CAGR_oval:
+        print(f"✅ {chart_type.capitalize()} stacked bar chart created successfully with CAGR ovals!")
+    else:
+        print(f"✅ {chart_type.capitalize()} stacked bar chart created successfully!")
+
+    return ax, insights_JSON

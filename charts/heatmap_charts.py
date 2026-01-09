@@ -3,12 +3,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+API_KEY = os.getenv('API_KEY')
+
 # Try to import scipy for smooth interpolation
 try:
     from scipy import interpolate
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
+
+from insights_functions import (
+    AVAILABLE_ESTIMATORS,
+    generate_strategic_insights
+)
 
 from common_functions import (
     get_scale_and_format_eur,
@@ -47,7 +58,6 @@ def create_custom_colormap_with_purple():
 
     return custom_cmap
 
-
 def create_divergent_purple_colormap():
     """
     Creates a divergent colormap for negative and positive values:
@@ -82,7 +92,6 @@ def create_divergent_purple_colormap():
     divergent_cmap = mcolors.LinearSegmentedColormap.from_list('divergent_purple', divergent_colors, N=n_bins)
 
     return divergent_cmap
-
 
 def create_gaussian_density_heatmap(x_data, y_data, color_data, grid_resolution=200,
                                    bandwidth='auto', kernel='gaussian',
@@ -184,10 +193,10 @@ def create_gaussian_density_heatmap(x_data, y_data, color_data, grid_resolution=
 
     return X_grid, Y_grid, Z_grid
 
-
 def validate_insight_squares(insight_squares, df):
     """
     Validates the insight_squares parameter structure and content.
+    New format: {'area_name': [x_left, x_right, y_bottom, y_top], 'param': 'column_name'}
 
     Parameters:
     -----------
@@ -232,51 +241,59 @@ def validate_insight_squares(insight_squares, df):
         if area_name == 'param':
             continue
 
-        if not isinstance(coords, list) or len(coords) != 3:
-            raise ValueError(f"Area '{area_name}' must have exactly 3 values [x, y, width]")
+        if not isinstance(coords, list) or len(coords) != 4:
+            raise ValueError(f"Area '{area_name}' must have exactly 4 values [x_left, x_right, y_bottom, y_top]")
 
         if not all(isinstance(val, (int, float)) for val in coords):
             raise ValueError(f"Area '{area_name}' coordinates must be numeric")
 
-        x, y, width = coords
-        if width <= 0:
-            raise ValueError(f"Area '{area_name}' width must be positive")
+        x_left, x_right, y_bottom, y_top = coords
 
-        if x < 0 or y < 0 or x > 100 or y > 100:
+        # Validate coordinate logic
+        if x_left >= x_right:
+            raise ValueError(f"Area '{area_name}': x_left ({x_left}) must be less than x_right ({x_right})")
+
+        if y_bottom >= y_top:
+            raise ValueError(f"Area '{area_name}': y_bottom ({y_bottom}) must be less than y_top ({y_top})")
+
+        # Validate bounds (0-100)
+        if not all(0 <= coord <= 100 for coord in coords):
             raise ValueError(f"Area '{area_name}' coordinates must be between 0 and 100")
 
     return insight_squares
 
-
-def validate_square_bounds(x_start, y_start, width):
+def validate_rectangle_bounds(x_left, x_right, y_bottom, y_top):
     """
-    Ensures square coordinates stay within graph bounds (0-100).
+    Ensures rectangle coordinates stay within graph bounds (0-100) and are valid.
 
     Parameters:
     -----------
-    x_start, y_start : float
-        Starting coordinates
-    width : float
-        Square width
+    x_left, x_right, y_bottom, y_top : float
+        Rectangle coordinates
 
     Returns:
     --------
-    tuple: (x_start, y_start, x_end, y_end) - validated coordinates
+    tuple: (x_left, x_right, y_bottom, y_top) - validated coordinates
     """
-    # Ensure starting points are within bounds
-    x_start = max(0, min(x_start, 100))
-    y_start = max(0, min(y_start, 100))
+    # Ensure coordinates are within bounds
+    x_left = max(0, min(x_left, 100))
+    x_right = max(0, min(x_right, 100))
+    y_bottom = max(0, min(y_bottom, 100))
+    y_top = max(0, min(y_top, 100))
 
-    # Calculate end points ensuring they don't exceed bounds
-    x_end = min(x_start + width, 100)
-    y_end = min(y_start + width, 100)
+    # Ensure logical ordering
+    if x_left >= x_right:
+        x_left, x_right = min(x_left, x_right), max(x_left, x_right)
 
-    return x_start, y_start, x_end, y_end
+    if y_bottom >= y_top:
+        y_bottom, y_top = min(y_bottom, y_top), max(y_bottom, y_top)
 
+    return x_left, x_right, y_bottom, y_top
 
 def analyze_areas(data, insight_squares):
     """
-    Analyzes data within defined square areas.
+    Analyzes data within defined rectangular areas.
+    New format: {'area_name': [x_left, x_right, y_bottom, y_top], 'param': 'column_name'}
 
     Parameters:
     -----------
@@ -287,65 +304,81 @@ def analyze_areas(data, insight_squares):
 
     Returns:
     --------
-    dict: Analysis results for each area
+    dict: Analysis results for each area including total dataset analysis
     """
     param_col = insight_squares['param']
     analysis = {}
 
+    # Calculate total dataset statistics
+    total_count = len(data)
+    total_analysis = {
+        "company_count": total_count,
+        "company_percentage": 100.0,  # Total is always 100%
+        f"{data.columns[0]} Mean": data.iloc[:, 0].mean(),  # Original X column
+        f"{data.columns[1]} Mean": data.iloc[:, 1].mean(),  # Original Y column
+        f"{param_col} Mean": data[param_col].mean(),
+        "coordinates": "entire_dataset"
+    }
+    analysis["Total"] = total_analysis
+
+    # Analyze each defined area
     for area_name, coords in insight_squares.items():
         if area_name == 'param':
             continue
 
-        x_start, y_start, width = coords
-        x_start, y_start, x_end, y_end = validate_square_bounds(x_start, y_start, width)
+        x_left, x_right, y_bottom, y_top = coords
+        x_left, x_right, y_bottom, y_top = validate_rectangle_bounds(x_left, x_right, y_bottom, y_top)
 
-        # Filter data within square bounds using normalized coordinates
-        mask = ((data['x_normalized'] >= x_start) &
-                (data['x_normalized'] <= x_end) &
-                (data['y_normalized'] >= y_start) &
-                (data['y_normalized'] <= y_end))
+        # Filter data within rectangle bounds using normalized coordinates
+        mask = ((data['x_normalized'] >= x_left) &
+                (data['x_normalized'] <= x_right) &
+                (data['y_normalized'] >= y_bottom) &
+                (data['y_normalized'] <= y_top))
 
         area_data = data[mask]
+        area_count = len(area_data)
+        area_percentage = (area_count / total_count * 100) if total_count > 0 else 0
 
-        if len(area_data) == 0:
+        if area_count == 0:
             analysis[area_name] = {
                 "company_count": 0,
+                "company_percentage": 0.0,
                 f"{data.columns[0]} Mean": None,
                 f"{data.columns[1]} Mean": None,
                 f"{param_col} Mean": None,
                 "coordinates": {
-                    "x_start": x_start,
-                    "y_start": y_start,
-                    "x_end": x_end,
-                    "y_end": y_end
+                    "x_left": x_left,
+                    "x_right": x_right,
+                    "y_bottom": y_bottom,
+                    "y_top": y_top
                 }
             }
         else:
             # Calculate means using original (non-normalized) values
             analysis[area_name] = {
-                "company_count": len(area_data),
+                "company_count": area_count,
+                "company_percentage": area_percentage,
                 f"{data.columns[0]} Mean": area_data.iloc[:, 0].mean(),  # Original X column
                 f"{data.columns[1]} Mean": area_data.iloc[:, 1].mean(),  # Original Y column
                 f"{param_col} Mean": area_data[param_col].mean(),
                 "coordinates": {
-                    "x_start": x_start,
-                    "y_start": y_start,
-                    "x_end": x_end,
-                    "y_end": y_end
+                    "x_left": x_left,
+                    "x_right": x_right,
+                    "y_bottom": y_bottom,
+                    "y_top": y_top
                 }
             }
 
     return analysis
 
-
 def generate_insights(areas_analysis, param_col, x_col, y_col):
     """
-    Generates comprehensive automatic insights from areas analysis including X, Y and param variables.
+    Generates comparative insights between areas and between each area and total dataset.
 
     Parameters:
     -----------
     areas_analysis : dict
-        Analysis results for each area
+        Analysis results for each area including "Total"
     param_col : str
         Name of the parameter column (color variable)
     x_col : str
@@ -355,191 +388,120 @@ def generate_insights(areas_analysis, param_col, x_col, y_col):
 
     Returns:
     --------
-    list: Generated comprehensive insights
+    list: Generated comparative insights
     """
     insights = []
-    area_names = list(areas_analysis.keys())
 
-    # Skip if less than 2 areas or any area has no companies
-    valid_areas = {name: data for name, data in areas_analysis.items()
-                   if data["company_count"] > 0 and data[f"{param_col} Mean"] is not None}
+    # Get total data for comparison
+    total_data = areas_analysis.get("Total", {})
 
-    if len(valid_areas) < 2:
-        insights.append(f"Insufficient data for comparative analysis across areas")
+    # Get area data (excluding Total)
+    area_data = {name: data for name, data in areas_analysis.items()
+                 if name != "Total" and data["company_count"] > 0 and data[f"{param_col} Mean"] is not None}
+
+    if len(area_data) == 0:
+        insights.append("No areas contain data for analysis")
         return insights
 
-    # === PARAM VARIABLE INSIGHTS ===
-    param_values = {name: data[f"{param_col} Mean"] for name, data in valid_areas.items()}
-    highest_param_area = max(param_values.keys(), key=lambda k: param_values[k])
-    lowest_param_area = min(param_values.keys(), key=lambda k: param_values[k])
+    area_names = list(area_data.keys())
 
-    if highest_param_area != lowest_param_area:
-        highest_val = param_values[highest_param_area]
-        lowest_val = param_values[lowest_param_area]
+    # Helper function to get safe ratio
+    def get_ratio(val1, val2):
+        if abs(val2) < 0.001:
+            return None
+        return abs(val1 / val2)
 
-        if abs(lowest_val) > 0.001:  # Avoid division by very small numbers
-            ratio = abs(highest_val / lowest_val)
-            if ratio > 1.5:  # Only report significant differences
-                insights.append(f"{param_col}: {highest_param_area} area shows {ratio:.1f}x higher values than {lowest_param_area} area")
-        else:
-            insights.append(f"{param_col}: {highest_param_area} area shows positive values while {lowest_param_area} area shows near-zero values")
+    # 1. COMPARISONS BETWEEN AREAS (if more than 1 area)
+    if len(area_names) >= 2:
+        # Compare param_col between areas
+        param_values = {name: data[f"{param_col} Mean"] for name, data in area_data.items()}
 
-    # === X-AXIS VARIABLE INSIGHTS ===
-    x_values = {name: data[f"{x_col} Mean"] for name, data in valid_areas.items()}
-    highest_x_area = max(x_values.keys(), key=lambda k: x_values[k])
-    lowest_x_area = min(x_values.keys(), key=lambda k: x_values[k])
+        # Find highest and lowest for param_col
+        highest_param_area = max(param_values.keys(), key=lambda k: param_values[k])
+        lowest_param_area = min(param_values.keys(), key=lambda k: param_values[k])
 
-    if highest_x_area != lowest_x_area:
-        highest_x_val = x_values[highest_x_area]
-        lowest_x_val = x_values[lowest_x_area]
+        if highest_param_area != lowest_param_area:
+            ratio = get_ratio(param_values[highest_param_area], param_values[lowest_param_area])
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {param_col} in {highest_param_area} area is {ratio:.1f}x higher than the mean of {param_col} in {lowest_param_area} area")
 
-        if abs(lowest_x_val) > 0.001:
-            x_ratio = abs(highest_x_val / lowest_x_val)
-            if x_ratio > 1.5:
-                insights.append(f"{x_col}: {highest_x_area} area excels with {x_ratio:.1f}x higher values than {lowest_x_area} area")
+        # Compare x_col between areas
+        x_values = {name: data[f"{x_col} Mean"] for name, data in area_data.items()}
+        highest_x_area = max(x_values.keys(), key=lambda k: x_values[k])
+        lowest_x_area = min(x_values.keys(), key=lambda k: x_values[k])
 
-    # === Y-AXIS VARIABLE INSIGHTS ===
-    y_values = {name: data[f"{y_col} Mean"] for name, data in valid_areas.items()}
-    highest_y_area = max(y_values.keys(), key=lambda k: y_values[k])
-    lowest_y_area = min(y_values.keys(), key=lambda k: y_values[k])
+        if highest_x_area != lowest_x_area:
+            ratio = get_ratio(x_values[highest_x_area], x_values[lowest_x_area])
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {x_col} in {highest_x_area} area is {ratio:.1f}x higher than the mean of {x_col} in {lowest_x_area} area")
 
-    if highest_y_area != lowest_y_area:
-        highest_y_val = y_values[highest_y_area]
-        lowest_y_val = y_values[lowest_y_area]
+        # Compare y_col between areas
+        y_values = {name: data[f"{y_col} Mean"] for name, data in area_data.items()}
+        highest_y_area = max(y_values.keys(), key=lambda k: y_values[k])
+        lowest_y_area = min(y_values.keys(), key=lambda k: y_values[k])
 
-        if abs(lowest_y_val) > 0.001:
-            y_ratio = abs(highest_y_val / lowest_y_val)
-            if y_ratio > 1.5:
-                insights.append(f"{y_col}: {highest_y_area} area leads with {y_ratio:.1f}x higher values than {lowest_y_area} area")
+        if highest_y_area != lowest_y_area:
+            ratio = get_ratio(y_values[highest_y_area], y_values[lowest_y_area])
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {y_col} in {highest_y_area} area is {ratio:.1f}x higher than the mean of {y_col} in {lowest_y_area} area")
 
-    # === COMPANY DISTRIBUTION INSIGHTS ===
-    company_counts = {name: data["company_count"] for name, data in valid_areas.items()}
-    most_populated = max(company_counts.keys(), key=lambda k: company_counts[k])
-    least_populated = min(company_counts.keys(), key=lambda k: company_counts[k])
+        # Compare company counts between areas
+        company_counts = {name: data["company_count"] for name, data in area_data.items()}
+        most_populated = max(company_counts.keys(), key=lambda k: company_counts[k])
+        least_populated = min(company_counts.keys(), key=lambda k: company_counts[k])
 
-    if most_populated != least_populated:
-        pop_ratio = company_counts[most_populated] / company_counts[least_populated]
-        if pop_ratio > 1.5:
-            insights.append(f"Company Distribution: {most_populated} area concentrates {company_counts[most_populated]} companies vs {company_counts[least_populated]} in {least_populated} area ({pop_ratio:.1f}x more)")
+        if most_populated != least_populated:
+            ratio = get_ratio(company_counts[most_populated], company_counts[least_populated])
+            if ratio and ratio > 1.2:
+                insights.append(f"The number of companies in {most_populated} area is {ratio:.1f}x higher than the number of companies in {least_populated} area ({company_counts[most_populated]} vs {company_counts[least_populated]})")
 
-    # === MULTI-VARIABLE CORRELATION INSIGHTS ===
-    # Check if the same area dominates multiple variables
-    dominance_count = {}
-    for area in valid_areas.keys():
-        dominance_count[area] = 0
-        if area == highest_param_area:
-            dominance_count[area] += 1
-        if area == highest_x_area:
-            dominance_count[area] += 1
-        if area == highest_y_area:
-            dominance_count[area] += 1
+    # 2. COMPARISONS BETWEEN EACH AREA AND TOTAL
+    if total_data and f"{param_col} Mean" in total_data:
+        total_param = total_data[f"{param_col} Mean"]
+        total_x = total_data[f"{x_col} Mean"]
+        total_y = total_data[f"{y_col} Mean"]
 
-    # Find areas that dominate multiple metrics
-    multi_dominant = {area: count for area, count in dominance_count.items() if count >= 2}
+        for area_name, area_info in area_data.items():
+            # Compare param_col with total
+            area_param = area_info[f"{param_col} Mean"]
+            ratio = get_ratio(area_param, total_param)
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {param_col} in {area_name} area is {ratio:.1f}x higher than the mean of {param_col} in all the data")
+            elif ratio and ratio < 0.8:
+                inverse_ratio = get_ratio(total_param, area_param)
+                if inverse_ratio:
+                    insights.append(f"The mean of {param_col} in all the data is {inverse_ratio:.1f}x higher than the mean of {param_col} in {area_name} area")
 
-    if multi_dominant:
-        for area, count in multi_dominant.items():
-            if count == 3:
-                insights.append(f"Strategic Positioning: {area} area demonstrates superior performance across all three dimensions ({param_col}, {x_col}, {y_col})")
-            elif count == 2:
-                leading_vars = []
-                if area == highest_param_area:
-                    leading_vars.append(param_col)
-                if area == highest_x_area:
-                    leading_vars.append(x_col)
-                if area == highest_y_area:
-                    leading_vars.append(y_col)
-                insights.append(f"{area} area shows dual leadership in {' and '.join(leading_vars)}")
+            # Compare x_col with total
+            area_x = area_info[f"{x_col} Mean"]
+            ratio = get_ratio(area_x, total_x)
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {x_col} in {area_name} area is {ratio:.1f}x higher than the mean of {x_col} in all the data")
+            elif ratio and ratio < 0.8:
+                inverse_ratio = get_ratio(total_x, area_x)
+                if inverse_ratio:
+                    insights.append(f"The mean of {x_col} in all the data is {inverse_ratio:.1f}x higher than the mean of {x_col} in {area_name} area")
 
-    # === PERFORMANCE SPREAD INSIGHTS ===
-    # Calculate coefficient of variation (relative dispersion) for each variable
-    def calc_coefficient_variation(values_dict):
-        values = list(values_dict.values())
-        if len(values) < 2:
-            return 0
-        mean_val = sum(values) / len(values)
-        if abs(mean_val) < 0.001:
-            return 0
-        variance = sum((x - mean_val) ** 2 for x in values) / len(values)
-        std_dev = variance ** 0.5
-        return std_dev / abs(mean_val)
+            # Compare y_col with total
+            area_y = area_info[f"{y_col} Mean"]
+            ratio = get_ratio(area_y, total_y)
+            if ratio and ratio > 1.2:
+                insights.append(f"The mean of {y_col} in {area_name} area is {ratio:.1f}x higher than the mean of {y_col} in all the data")
+            elif ratio and ratio < 0.8:
+                inverse_ratio = get_ratio(total_y, area_y)
+                if inverse_ratio:
+                    insights.append(f"The mean of {y_col} in all the data is {inverse_ratio:.1f}x higher than the mean of {y_col} in {area_name} area")
 
-    param_cv = calc_coefficient_variation(param_values)
-    x_cv = calc_coefficient_variation(x_values)
-    y_cv = calc_coefficient_variation(y_values)
-
-    # Identify which variable shows most variation across areas
-    cv_vars = [(param_cv, param_col), (x_cv, x_col), (y_cv, y_col)]
-    cv_vars.sort(reverse=True, key=lambda x: x[0])
-
-    if cv_vars[0][0] > 0.3:  # Significant variation threshold
-        most_varied = cv_vars[0][1]
-        insights.append(f"Variability Analysis: {most_varied} shows the highest variation across areas, indicating strong regional differences")
-
-    # === BALANCE VS SPECIALIZATION INSIGHTS ===
-    # Check if any area is consistently average (balanced) vs specialized
-    area_rankings = {}
-
-    for area in valid_areas.keys():
-        rankings = []
-
-        # Rank in param_col
-        param_rank = sorted(param_values.items(), key=lambda x: x[1], reverse=True)
-        param_position = next(i for i, (name, _) in enumerate(param_rank) if name == area) + 1
-        rankings.append(param_position)
-
-        # Rank in x_col
-        x_rank = sorted(x_values.items(), key=lambda x: x[1], reverse=True)
-        x_position = next(i for i, (name, _) in enumerate(x_rank) if name == area) + 1
-        rankings.append(x_position)
-
-        # Rank in y_col
-        y_rank = sorted(y_values.items(), key=lambda x: x[1], reverse=True)
-        y_position = next(i for i, (name, _) in enumerate(y_rank) if name == area) + 1
-        rankings.append(y_position)
-
-        area_rankings[area] = {
-            'ranks': rankings,
-            'avg_rank': sum(rankings) / len(rankings),
-            'rank_variance': sum((r - sum(rankings)/len(rankings))**2 for r in rankings) / len(rankings)
-        }
-
-    # Find most balanced area (consistently average ranks, low variance)
-    most_balanced = min(area_rankings.items(), key=lambda x: x[1]['rank_variance'])
-    if most_balanced[1]['rank_variance'] < 0.5 and len(valid_areas) >= 3:
-        insights.append(f"Balanced Performance: {most_balanced[0]} area shows consistent performance across all metrics (balanced strategy)")
-
-    # === STRATEGIC RECOMMENDATIONS ===
-    if len(insights) >= 3:
-        # Identify the overall best performing area based on combined metrics
-        area_scores = {}
-        for area in valid_areas.keys():
-            score = 0
-            if area == highest_param_area:
-                score += 3
-            if area == highest_x_area:
-                score += 2
-            if area == highest_y_area:
-                score += 2
-            if area == most_populated:
-                score += 1
-            area_scores[area] = score
-
-        best_overall = max(area_scores.items(), key=lambda x: x[1])
-        if best_overall[1] >= 4:  # High combined score
-            insights.append(f"Strategic Focus: {best_overall[0]} area represents the optimal positioning with superior performance across multiple key metrics")
-
-    # Ensure we don't return too many insights (keep most relevant)
-    if len(insights) > 8:
-        insights = insights[:8]
+    # Limit insights to avoid overwhelm
+    if len(insights) > 12:
+        insights = insights[:12]
 
     return insights
-
 
 def create_smooth_density_heatmap(df, x_col, y_col, color_col,
                                   figsize=(12, 8), percentile_range=None,
                                   cmap='viridis', show_scatter_points=True,
-                                  # Insight squares parameter
+                                  # Insight squares parameter (NEW FORMAT)
                                   insight_squares=None,
                                   # Density field parameters
                                   grid_resolution=200,
@@ -551,7 +513,8 @@ def create_smooth_density_heatmap(df, x_col, y_col, color_col,
                                   interpolation='bilinear',
                                   transparent_bg=True,
                                   scatter_alpha=0.7,
-                                  scatter_size=30):
+                                  scatter_size=30,
+                                  openai=False):
     """
     Creates a smooth continuous heatmap using Gaussian density fields.
     Each data point generates a smooth "field of influence" that decays gradually,
@@ -577,7 +540,8 @@ def create_smooth_density_heatmap(df, x_col, y_col, color_col,
         Whether to overlay original scatter points on the heatmap
     insight_squares : dict, optional
         Dictionary defining analysis areas and parameter column
-        Example: {'Low':[20,40,10], 'High':[80,90,10], 'param':'EBITDA EUR 2024'}
+        NEW FORMAT: {'Area1':[x_left, x_right, y_bottom, y_top], 'Area2':[x_left, x_right, y_bottom, y_top], 'param':'column_name'}
+        Example: {'High':[70, 90, 60, 80], 'Low':[10, 30, 20, 40], 'param':'EBITDA EUR 2024'}
 
     # DENSITY FIELD PARAMETERS:
     grid_resolution : int, default 200
@@ -724,6 +688,31 @@ def create_smooth_density_heatmap(df, x_col, y_col, color_col,
                             edgecolors='white', linewidth=0.5,
                             vmin=vmin, vmax=vmax, zorder=10)
 
+    # Draw insight rectangles if provided
+    if insight_squares is not None:
+        from matplotlib.patches import Rectangle
+
+        for area_name, coords in insight_squares.items():
+            if area_name == 'param':
+                continue
+
+            x_left, x_right, y_bottom, y_top = coords
+            x_left, x_right, y_bottom, y_top = validate_rectangle_bounds(x_left, x_right, y_bottom, y_top)
+
+            # Draw rectangle
+            width = x_right - x_left
+            height = y_top - y_bottom
+
+            rect = Rectangle((x_left, y_bottom), width, height,
+                           linewidth=1, edgecolor='black',
+                           facecolor='none', alpha=1.0, zorder=15)
+            ax.add_patch(rect)
+
+            # Add label
+            ax.text(x_left + width/2, y_top + 1, area_name,
+                   ha='center', va='bottom', fontsize=10, fontweight='bold',
+                   color='black', zorder=20)
+
     # Configure axes (X and Y remain normalized 0-100 for positioning)
     ax.set_xlim(0, 100)
     ax.set_ylim(0, 100)
@@ -845,12 +834,17 @@ def create_smooth_density_heatmap(df, x_col, y_col, color_col,
     if insight_squares is not None:
         # Perform areas analysis
         areas_analysis = analyze_areas(data, insight_squares)
-        insights = generate_insights(areas_analysis, insight_squares['param'],x_col, y_col)
+        insights = generate_insights(areas_analysis, insight_squares['param'], x_col, y_col)
 
         analysis_json = {
             "areas_analysis": areas_analysis,
             "insights": insights
         }
+        if openai is True:
+          analysis_json = generate_strategic_insights(
+              y_col, color_col,x_col,analysis_json,
+              API_KEY=API_KEY
+          )
 
         return fig, analysis_json
     else:
@@ -867,5 +861,10 @@ def create_smooth_density_heatmap(df, x_col, y_col, color_col,
                 f"Average {y_col.replace('_', ' ').title()}: {data[y_col].mean():.2f}"
             ]
         }
+        if openai is True:
+          analysis_json = generate_strategic_insights(
+              y_col, color_col,x_col,analysis_json,
+              API_KEY=API_KEY
+          )
 
         return fig, analysis_json
