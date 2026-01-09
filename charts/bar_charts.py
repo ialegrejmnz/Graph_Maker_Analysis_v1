@@ -20,8 +20,16 @@ from charts.insights_functions import (
 
 from charts.common_functions import (
     get_scale_and_format_eur,
+    format_eur_axis,
+    format_regular_axis,
+    format_category_name,
+    format_value_consistent,
     generate_intelligent_ylabel,
-    setup_chart_style
+    setup_chart_style,
+    save_plot_with_transparency,
+    create_custom_color_palette,
+    apply_outlier_filtering,
+    interpolate_missing_values
 )
 
 def format_number_with_units(value):
